@@ -12,3 +12,4 @@ from pbs_mcp.tools import tasks  # noqa: F401
 from pbs_mcp.tools import gc  # noqa: F401
 from pbs_mcp.tools import verify  # noqa: F401
 from pbs_mcp.tools import prune  # noqa: F401
+from pbs_mcp.tools import health  # noqa: F401

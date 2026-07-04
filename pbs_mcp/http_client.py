@@ -1,9 +1,16 @@
 """Async HTTP helpers for the Proxmox Backup Server REST API.
 
 Built on httpx.AsyncClient — no blocking I/O on the asyncio loop.
+
+Connections are pooled in a shared client (one per event loop) so
+multi-request tools like pbs_health_overview don't pay a TLS handshake
+per call. GET requests retry once on transient failures: connect errors,
+read timeouts, and HTTP 403 (PBS caches ACLs for a few seconds after a
+grant, so a fresh token can 403 spuriously).
 """
 from __future__ import annotations
 
+import asyncio
 import urllib.parse
 from typing import Any, Optional
 
@@ -11,17 +18,30 @@ import httpx
 
 from pbs_mcp import config
 
+# Delay before the single GET retry. 403 retries wait longer because the
+# PBS ACL cache takes ~3s to pick up new grants.
+RETRY_DELAY_TRANSIENT = 1.0
+RETRY_DELAY_ACL = 2.5
+
+# One client per event loop: FastMCP runs a single loop in production, but
+# tests may spin up a fresh loop per test case.
+_clients: dict[int, httpx.AsyncClient] = {}
+
 
 def _client() -> httpx.AsyncClient:
-    """Build a one-shot AsyncClient. Used inside `async with` blocks so
-    connections are closed after each call — simpler lifetime than a
-    long-lived session, and PBS keepalives are short anyway."""
-    return httpx.AsyncClient(
-        base_url=config.base_url(),
-        headers=config.auth_header(),
-        verify=config.PBS_VERIFY_TLS,
-        timeout=config.PBS_HTTP_TIMEOUT,
-    )
+    """Return the shared AsyncClient for the running event loop, creating
+    it on first use."""
+    loop_key = id(asyncio.get_running_loop())
+    client = _clients.get(loop_key)
+    if client is None or client.is_closed:
+        client = httpx.AsyncClient(
+            base_url=config.base_url(),
+            headers=config.auth_header(),
+            verify=config.PBS_VERIFY_TLS,
+            timeout=config.PBS_HTTP_TIMEOUT,
+        )
+        _clients[loop_key] = client
+    return client
 
 
 def format_http_error(exc: Exception) -> str:
@@ -57,11 +77,32 @@ def _unwrap(payload: Any) -> Any:
     return payload
 
 
-async def get(path: str, params: Optional[dict] = None) -> Any:
-    async with _client() as c:
+async def _get_response(path: str, params: Optional[dict]) -> httpx.Response:
+    """GET with a single retry on transient failures. Safe because GET is
+    idempotent; POST/DELETE/PUT never auto-retry."""
+    c = _client()
+    try:
         r = await c.get(path, params=params)
-        r.raise_for_status()
-        return _unwrap(r.json())
+    except (httpx.ConnectError, httpx.ReadTimeout):
+        await asyncio.sleep(RETRY_DELAY_TRANSIENT)
+        r = await c.get(path, params=params)
+    if r.status_code == 403:
+        await asyncio.sleep(RETRY_DELAY_ACL)
+        r = await c.get(path, params=params)
+    r.raise_for_status()
+    return r
+
+
+async def get(path: str, params: Optional[dict] = None) -> Any:
+    r = await _get_response(path, params)
+    return _unwrap(r.json())
+
+
+async def get_full(path: str, params: Optional[dict] = None) -> Any:
+    """Like get(), but return the whole JSON payload without unwrapping —
+    some endpoints (task log) carry metadata like 'total' next to 'data'."""
+    r = await _get_response(path, params)
+    return r.json()
 
 
 async def post(
@@ -69,17 +110,28 @@ async def post(
     params: Optional[dict] = None,
     json_body: Optional[dict] = None,
 ) -> Any:
-    async with _client() as c:
-        r = await c.post(path, params=params, json=json_body)
-        r.raise_for_status()
-        return _unwrap(r.json())
+    c = _client()
+    r = await c.post(path, params=params, json=json_body)
+    r.raise_for_status()
+    return _unwrap(r.json())
+
+
+async def put(
+    path: str,
+    params: Optional[dict] = None,
+    json_body: Optional[dict] = None,
+) -> Any:
+    c = _client()
+    r = await c.put(path, params=params, json=json_body)
+    r.raise_for_status()
+    return _unwrap(r.json())
 
 
 async def delete(path: str, params: Optional[dict] = None) -> Any:
-    async with _client() as c:
-        r = await c.delete(path, params=params)
-        r.raise_for_status()
-        return _unwrap(r.json())
+    c = _client()
+    r = await c.delete(path, params=params)
+    r.raise_for_status()
+    return _unwrap(r.json())
 
 
 # ----- task helpers ---------------------------------------------------------
@@ -101,13 +153,19 @@ async def task_log(
     start: int | None = None,
     limit: int | None = None,
 ) -> Any:
+    """Return the full task-log payload: {'data': [...], 'total': N}."""
     encoded = encode_upid(upid)
     params: dict[str, Any] = {}
     if start is not None:
         params["start"] = start
     if limit is not None:
         params["limit"] = limit
-    return await get(
+    return await get_full(
         f"/nodes/{config.PBS_NODE}/tasks/{encoded}/log",
         params=params or None,
     )
+
+
+async def stop_task(upid: str) -> Any:
+    encoded = encode_upid(upid)
+    return await delete(f"/nodes/{config.PBS_NODE}/tasks/{encoded}")

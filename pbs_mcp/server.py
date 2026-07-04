@@ -23,21 +23,26 @@ from pbs_mcp import tools  # noqa: F401
 
 
 TOOLS = [
+    # health
+    "pbs_health_overview",
     # datastore
     "pbs_list_datastores",
     "pbs_datastore_status",
     # snapshots / groups
     "pbs_list_groups",
     "pbs_list_snapshots",
+    "pbs_protect_snapshot",
     "pbs_forget_snapshot",
     # tasks
     "pbs_get_task_status",
     "pbs_get_task_log",
     "pbs_list_tasks",
+    "pbs_stop_task",
     # garbage collection
     "pbs_gc_status",
     "pbs_run_gc",
     # verify
+    "pbs_list_verify_jobs",
     "pbs_run_verify",
     # prune
     "pbs_prune_dry_run",

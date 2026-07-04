@@ -1,4 +1,4 @@
-"""Backup group / snapshot listing and snapshot deletion tools."""
+"""Backup group / snapshot listing, protection, and deletion tools."""
 from __future__ import annotations
 
 from typing import Any, Optional
@@ -95,6 +95,74 @@ class ListSnapshotsInput(BaseModel):
         max_length=64,
         pattern=r"^[A-Za-z0-9._-]+$",
     )
+    limit: int = Field(
+        default=50,
+        ge=1,
+        le=1000,
+        description="Max snapshots to list, newest first.",
+    )
+    summary: bool = Field(
+        default=False,
+        description=(
+            "If true, return one aggregate row per backup group (count, "
+            "total size, latest snapshot, verify state counts) instead of "
+            "one row per snapshot. Much cheaper on large datastores."
+        ),
+    )
+
+
+def _snapshot_size(snap: dict) -> int:
+    files = snap.get("files") or []
+    return snap.get("size") or sum(
+        f.get("size") or 0 for f in files if isinstance(f, dict)
+    )
+
+
+def _verify_state(snap: dict) -> Optional[str]:
+    verification = snap.get("verification") or {}
+    if isinstance(verification, dict):
+        return verification.get("state")
+    return None
+
+
+def _summary_table(data: list[dict]) -> str:
+    groups: dict[tuple[str, str], dict[str, Any]] = {}
+    for snap in data:
+        key = (snap.get("backup-type", "?"), snap.get("backup-id", "?"))
+        g = groups.setdefault(
+            key,
+            {"count": 0, "size": 0, "latest": 0, "ok": 0, "failed": 0, "never": 0},
+        )
+        g["count"] += 1
+        g["size"] += _snapshot_size(snap)
+        g["latest"] = max(g["latest"], snap.get("backup-time") or 0)
+        state = _verify_state(snap)
+        if state == "ok":
+            g["ok"] += 1
+        elif state is None:
+            g["never"] += 1
+        else:
+            g["failed"] += 1
+
+    rows = []
+    for (btype, bid), g in sorted(groups.items()):
+        verify_cell = f"{g['ok']} ok"
+        if g["failed"]:
+            verify_cell += f", {g['failed']} FAILED ❌"
+        if g["never"]:
+            verify_cell += f", {g['never']} never"
+        rows.append(
+            [
+                f"{btype}/{bid}",
+                g["count"],
+                fmt_bytes(g["size"]),
+                fmt_unix_ts(g["latest"]),
+                verify_cell,
+            ]
+        )
+    return md_table(
+        ["Group", "Snapshots", "Total size", "Latest (UTC)", "Verify"], rows
+    )
 
 
 @mcp.tool(
@@ -109,7 +177,8 @@ class ListSnapshotsInput(BaseModel):
 )
 async def pbs_list_snapshots(params: ListSnapshotsInput) -> str:
     """List snapshots on a datastore with size, file count, protected flag,
-    last verify state, and owner. Optional filter by backup_type + backup_id."""
+    and last verify state — newest first, capped at `limit`. Set summary=true
+    for one aggregate row per group instead (preferred for overviews)."""
     cfg = config.require_config()
     if cfg:
         return cfg
@@ -139,40 +208,119 @@ async def pbs_list_snapshots(params: ListSnapshotsInput) -> str:
         )
         return f"_No snapshots on `{ds}` matching {scope}._"
 
-    rows = []
-    for snap in data:
-        files = snap.get("files") or []
-        total_size = snap.get("size") or sum(
-            f.get("size") or 0 for f in files if isinstance(f, dict)
+    if params.summary:
+        return (
+            f"## PBS snapshot summary on `{ds}` "
+            f"({len(data)} snapshots)\n\n" + _summary_table(data)
         )
-        verification = snap.get("verification") or {}
-        v_state = verification.get("state") if isinstance(verification, dict) else None
+
+    data.sort(key=lambda s: s.get("backup-time") or 0, reverse=True)
+    total_count = len(data)
+    shown = data[: params.limit]
+
+    rows = []
+    for snap in shown:
         protected = "yes" if snap.get("protected") else "no"
         rows.append(
             [
                 snap.get("backup-type", "?"),
                 snap.get("backup-id", "?"),
                 fmt_unix_ts(snap.get("backup-time")),
-                fmt_bytes(total_size),
-                len(files),
+                fmt_bytes(_snapshot_size(snap)),
+                len(snap.get("files") or []),
                 protected,
-                v_state or "-",
-                snap.get("owner", "-"),
+                _verify_state(snap) or "-",
             ]
         )
 
-    return f"## PBS snapshots on `{ds}`\n\n" + md_table(
-        [
-            "Type",
-            "ID",
-            "Time (UTC)",
-            "Size",
-            "Files",
-            "Protected",
-            "Verify",
-            "Owner",
-        ],
+    md = f"## PBS snapshots on `{ds}`\n\n" + md_table(
+        ["Type", "ID", "Time (UTC)", "Size", "Files", "Protected", "Verify"],
         rows,
+    )
+    if total_count > len(shown):
+        md += (
+            f"\n\n_Showing newest {len(shown)} of {total_count}. Raise `limit`, "
+            f"filter by backup_type/backup_id, or use summary=true._"
+        )
+    return md
+
+
+# ---------- pbs_protect_snapshot ----------------------------------------------
+
+
+class ProtectSnapshotInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    datastore: Optional[str] = Field(default=None, max_length=64)
+    backup_type: str = Field(
+        description="'vm', 'ct', or 'host'.", pattern=r"^(vm|ct|host)$"
+    )
+    backup_id: str = Field(
+        description="VMID or hostname.",
+        max_length=64,
+        pattern=r"^[A-Za-z0-9._-]+$",
+    )
+    backup_time: str = Field(
+        description=(
+            "Snapshot timestamp in PBS ISO format, e.g. '2026-05-25T10:54:07Z'. "
+            "Get from pbs_list_snapshots (the 'Time' column gives this format)."
+        ),
+        max_length=40,
+        pattern=r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$",
+    )
+    protected: bool = Field(
+        description="true to protect the snapshot, false to remove protection."
+    )
+    confirm: bool = Field(default=False, description="Required.")
+    reason: Optional[str] = Field(default=None, max_length=200)
+
+
+@mcp.tool(
+    name="pbs_protect_snapshot",
+    annotations={
+        "title": "Set PBS snapshot protection",
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True,
+    },
+)
+async def pbs_protect_snapshot(params: ProtectSnapshotInput) -> str:
+    """Set or clear the protected flag on one snapshot. Protected snapshots
+    are skipped by prune and cannot be forgotten until unprotected.
+    Requires PBS_ALLOW_WRITE=true and confirm=true."""
+    cfg = config.require_config()
+    if cfg:
+        return cfg
+    block = config.require_write("pbs_protect_snapshot")
+    if block:
+        return block
+    if not params.confirm:
+        return (
+            "Refused: pbs_protect_snapshot requires confirm=true. "
+            "This changes whether prune/forget can touch the snapshot."
+        )
+    try:
+        ds = config.resolve_datastore(params.datastore)
+    except config.PbsConfigError as e:
+        return f"Error: {e}"
+    try:
+        await http_client.put(
+            f"/admin/datastore/{ds}/protected",
+            params={
+                "backup-type": params.backup_type,
+                "backup-id": params.backup_id,
+                "backup-time": params.backup_time,
+            },
+            json_body={"protected": params.protected},
+        )
+    except Exception as exc:
+        return http_client.format_http_error(exc)
+
+    state = "PROTECTED" if params.protected else "unprotected"
+    reason_suffix = f" (reason: {params.reason})" if params.reason else ""
+    return (
+        f"OK: snapshot `{params.backup_type}/{params.backup_id}/"
+        f"{params.backup_time}` on `{ds}` is now {state}{reason_suffix}."
     )
 
 

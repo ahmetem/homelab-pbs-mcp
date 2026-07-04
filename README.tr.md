@@ -2,7 +2,7 @@
 
 **Proxmox Backup Server** için MCP server. PBS REST API üzerinden datastore
 durumu, snapshot envanteri, garbage collection, verify ve prune işlemlerini
-13 LLM-callable tool olarak sunar.
+17 LLM-callable tool olarak sunar.
 [Model Context Protocol](https://modelcontextprotocol.io) için tasarlandı.
 
 For English → [README.md](README.md)
@@ -14,23 +14,32 @@ PBS hakkında soru sormam lazım" durumları için. Bir sohbet asistanından
 "bir şey bozulmuş mu?" diye sorabilmek; veya bir homelab agent'in gerçek
 duruma göre verify ve prune planlayabilmesi için.
 
-## Tool'lar (13)
+## Tool'lar (17)
 
 | # | Tool | Mod | Not |
 |---|------|-----|-----|
-| 1 | `pbs_list_datastores` | read | Yapılandırılmış datastore'lar + scheduler |
-| 2 | `pbs_datastore_status` | read | toplam / kullanılan / boş byte |
-| 3 | `pbs_list_groups` | read | Snapshot sayısı, owner, corrupt flag |
-| 4 | `pbs_list_snapshots` | read | Boyut, dosya, son verify state, protected flag |
-| 5 | `pbs_get_task_status` | read | UPID → running / OK / error |
-| 6 | `pbs_get_task_log` | read | Task log'unu tail veya sayfala |
-| 7 | `pbs_list_tasks` | read | Son task'ler, isteğe bağlı filtre |
-| 8 | `pbs_gc_status` | read | Son GC istatistikleri: referans, pending, kaldırılan |
-| 9 | `pbs_run_gc` | **write** | GC tetikle, UPID döner (async) |
-| 10 | `pbs_run_verify` | **write** | Verify tetikle, isteğe bağlı snapshot scope |
+| 1 | `pbs_health_overview` | read | Tek çağrılık sağlık raporu: disk, GC, verify kapsamı, tazelik, hatalı task'ler |
+| 2 | `pbs_list_datastores` | read | Yapılandırılmış datastore'lar + scheduler |
+| 3 | `pbs_datastore_status` | read | toplam / kullanılan / boş byte |
+| 4 | `pbs_list_groups` | read | Snapshot sayısı, owner, corrupt flag |
+| 5 | `pbs_list_snapshots` | read | En yeniden eskiye, `limit`'li; `summary=true` ile grup başına tek satır |
+| 6 | `pbs_get_task_status` | read | UPID → running / OK / error |
+| 7 | `pbs_get_task_log` | read | Task log'unu sayfala, `tail=true` ile sadece sonu |
+| 8 | `pbs_list_tasks` | read | Son task'ler; çalışan/hatalı olanlar için tam UPID verilir |
+| 9 | `pbs_gc_status` | read | Son GC istatistikleri: referans, pending, kaldırılan |
+| 10 | `pbs_list_verify_jobs` | read | Zamanlanmış verify job'ları + re-verify politikası |
 | 11 | `pbs_prune_dry_run` | read | Hangi snapshot'lar silinecek önizleme |
-| 12 | `pbs_prune` | **write** | Retention policy uygula |
-| 13 | `pbs_forget_snapshot` | **write** | Tek snapshot sil (corrupt cleanup) |
+| 12 | `pbs_run_gc` | **write** | GC tetikle, UPID döner (async) |
+| 13 | `pbs_run_verify` | **write** | Verify tetikle, isteğe bağlı snapshot scope |
+| 14 | `pbs_prune` | **write** | Retention policy uygula |
+| 15 | `pbs_protect_snapshot` | **write** | Protected bayrağını aç/kapa (prune/forget korumalıyı atlar) |
+| 16 | `pbs_forget_snapshot` | **write** | Tek snapshot sil (corrupt cleanup) |
+| 17 | `pbs_stop_task` | **write** | Çalışan task'i durdur (örn. yavaş NFS'te takılan GC) |
+
+"PBS sağlıklı mı?" tipi her soru için `pbs_health_overview` ile başla —
+datastore durumu, GC istatistikleri, gruplar, snapshot'lar, node durumu ve
+son task'leri paralel çekip tek bir hükme indirger; beş ayrı tool çağrısının
+yerini tutar.
 
 Write tool'ları **iki şartı** birden ister: ortamda `PBS_ALLOW_WRITE=true`
 ve çağrıda `confirm=true`. Restore burada yok — standart `proxmox-mcp`
@@ -103,8 +112,9 @@ Client'i yeniden başlat. `pbs_*` tool'ları görünmeli.
 ## Notlar / gotcha'lar
 
 * **İlk çağrıda cache gecikmesi**: PBS ACL'leri birkaç saniye cache'ler.
-  Yetki verir vermez "permission check failed" alırsan 3 saniye bekle ve
-  tekrar dene.
+  GET istekleri 403 / bağlantı hatasında kısa bir bekleme sonrası otomatik
+  bir kez yeniden dener; yeni verilmiş token genelde direkt çalışır. Yine
+  de hata alırsan birkaç saniye bekleyip tekrar dene.
 * **Token izinleri vs user izinleri**: PBS API token'ları, parent user'ın
   ACL'leri ile kendi ACL'lerinin kesişimini alır. `root@pam!mcp` ile parent
   superuser, pratikte sadece token'ın ACL'i geçerli.
@@ -114,6 +124,15 @@ Client'i yeniden başlat. `pbs_*` tool'ları görünmeli.
 * **UPID'ler yaratıcılarına bağlı**: silinen bir kullanıcının başlattığı
   UPID artık okunamaz hale gelir. Pending task varken PBS user'larını
   silme.
+
+## Geliştirme
+
+```bash
+pip install -e .[dev]
+pytest
+```
+
+Testler HTTP katmanını stub'lar — PBS instance'ına gerek yok.
 
 ## Lisans
 

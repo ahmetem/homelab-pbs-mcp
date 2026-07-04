@@ -1,12 +1,14 @@
 """Task tracking tools.
 
 PBS runs verify/GC/prune asynchronously and returns a UPID string.
-These tools let you check status, tail the log, or browse recent tasks.
+These tools let you check status, tail the log, browse recent tasks,
+or abort a stuck task.
 """
 from __future__ import annotations
 
-import re
 from typing import Any, Optional
+
+import re
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -103,7 +105,7 @@ class GetTaskLogInput(BaseModel):
     start: int = Field(
         default=0,
         ge=0,
-        description="Line number to start from (0-indexed).",
+        description="Line number to start from (0-indexed). Ignored when tail=true.",
     )
     limit: int = Field(
         default=200,
@@ -111,6 +113,23 @@ class GetTaskLogInput(BaseModel):
         le=5000,
         description="Max lines to fetch.",
     )
+    tail: bool = Field(
+        default=False,
+        description=(
+            "If true, return the LAST `limit` lines instead of reading from "
+            "`start`. Use this to check how a long verify/GC ended."
+        ),
+    )
+
+
+def _log_lines(data: Any) -> list[str]:
+    if not isinstance(data, list):
+        return []
+    return [
+        f"{entry.get('n', '?'):>5}  {entry.get('t', '')}"
+        for entry in data
+        if isinstance(entry, dict)
+    ]
 
 
 @mcp.tool(
@@ -124,8 +143,9 @@ class GetTaskLogInput(BaseModel):
     },
 )
 async def pbs_get_task_log(params: GetTaskLogInput) -> str:
-    """Fetch log lines from a PBS task. Supports pagination via start and
-    limit. Useful for watching verify or GC progress."""
+    """Fetch log lines from a PBS task. Supports pagination via start/limit,
+    or tail=true for just the end of the log — usually all you need to see
+    how a verify or GC finished."""
     cfg = config.require_config()
     if cfg:
         return cfg
@@ -133,21 +153,35 @@ async def pbs_get_task_log(params: GetTaskLogInput) -> str:
     if err:
         return err
     try:
-        data = await http_client.task_log(
-            params.upid, start=params.start, limit=params.limit
-        )
+        if params.tail:
+            # Probe total line count first, then fetch only the tail window.
+            probe = await http_client.task_log(params.upid, start=0, limit=1)
+            total = probe.get("total") if isinstance(probe, dict) else None
+            if not isinstance(total, int) or total <= 0:
+                payload = probe
+            else:
+                tail_start = max(0, total - params.limit)
+                payload = await http_client.task_log(
+                    params.upid, start=tail_start, limit=params.limit
+                )
+        else:
+            payload = await http_client.task_log(
+                params.upid, start=params.start, limit=params.limit
+            )
     except Exception as exc:
         return http_client.format_http_error(exc)
 
-    if not isinstance(data, list) or not data:
+    data = payload.get("data") if isinstance(payload, dict) else payload
+    total = payload.get("total") if isinstance(payload, dict) else None
+    lines = _log_lines(data)
+    if not lines:
         return f"_No log lines for UPID (start={params.start}, limit={params.limit})._"
-    lines = [
-        f"{entry.get('n', '?'):>5}  {entry.get('t', '')}"
-        for entry in data
-        if isinstance(entry, dict)
-    ]
+    header = "## Task log"
+    if isinstance(total, int):
+        header += f" ({len(lines)} of {total} lines"
+        header += ", tail)" if params.tail else ")"
     body = "\n".join(lines)
-    return truncate(f"## Task log\n\n```\n{body}\n```", limit=8000)
+    return truncate(f"{header}\n\n```\n{body}\n```", limit=8000)
 
 
 # ---------- pbs_list_tasks ---------------------------------------------------
@@ -192,7 +226,8 @@ class ListTasksInput(BaseModel):
 )
 async def pbs_list_tasks(params: ListTasksInput) -> str:
     """Browse recent PBS tasks with optional type filter, running-only flag,
-    and errors-only flag."""
+    and errors-only flag. Running or failed tasks come with their full UPID
+    for follow-up via pbs_get_task_status / pbs_get_task_log."""
     cfg = config.require_config()
     if cfg:
         return cfg
@@ -215,6 +250,7 @@ async def pbs_list_tasks(params: ListTasksInput) -> str:
         return "_No tasks match the given filters._"
 
     rows = []
+    followup_upids: list[str] = []
     for t in data:
         status = t.get("status", "?")
         exitstatus = t.get("exitstatus") or ""
@@ -222,6 +258,11 @@ async def pbs_list_tasks(params: ListTasksInput) -> str:
             status_cell = f"{status} ({exitstatus[:30]})"
         else:
             status_cell = status
+        upid = t.get("upid") or ""
+        # Only running/failed tasks need follow-up; a truncated UPID is
+        # useless for that, so hand out the full string for exactly those.
+        if upid and (status == "running" or (exitstatus and exitstatus != "OK")):
+            followup_upids.append(f"- `{upid}` — {t.get('type', '?')} {status_cell}")
         rows.append(
             [
                 t.get("type", "-"),
@@ -229,14 +270,71 @@ async def pbs_list_tasks(params: ListTasksInput) -> str:
                 fmt_unix_ts(t.get("starttime")),
                 status_cell,
                 t.get("user", "-"),
-                (t.get("upid") or "")[:55] + "...",
             ]
         )
-    return (
-        "## Recent PBS tasks\n\n"
-        + md_table(
-            ["Type", "ID", "Started (UTC)", "Status", "User", "UPID (truncated)"],
-            rows,
+    md = "## Recent PBS tasks\n\n" + md_table(
+        ["Type", "ID", "Started (UTC)", "Status", "User"], rows
+    )
+    if followup_upids:
+        shown = followup_upids[:10]
+        md += "\n\n**Follow-up UPIDs (running / failed):**\n" + "\n".join(shown)
+        if len(followup_upids) > len(shown):
+            md += f"\n_... and {len(followup_upids) - len(shown)} more._"
+        md += "\n\nUse `pbs_get_task_status` or `pbs_get_task_log` with a full UPID."
+    return md
+
+
+# ---------- pbs_stop_task ------------------------------------------------------
+
+
+class StopTaskInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    upid: str = Field(
+        description="Full UPID of the running task to abort.",
+        max_length=256,
+        min_length=10,
+    )
+    confirm: bool = Field(default=False, description="Required.")
+    reason: Optional[str] = Field(default=None, max_length=200)
+
+
+@mcp.tool(
+    name="pbs_stop_task",
+    annotations={
+        "title": "Stop a running PBS task",
+        "readOnlyHint": False,
+        "destructiveHint": True,
+        "idempotentHint": True,
+        "openWorldHint": True,
+    },
+)
+async def pbs_stop_task(params: StopTaskInput) -> str:
+    """Abort a running PBS task (e.g. a GC or verify stuck on a slow NFS
+    datastore). The task stops at the next safe point; an interrupted GC or
+    verify can simply be re-run later. Requires PBS_ALLOW_WRITE=true and
+    confirm=true."""
+    cfg = config.require_config()
+    if cfg:
+        return cfg
+    block = config.require_write("pbs_stop_task")
+    if block:
+        return block
+    if not params.confirm:
+        return (
+            "Refused: pbs_stop_task requires confirm=true. "
+            "This aborts the running task."
         )
-        + "\n\nUse `pbs_get_task_status` or `pbs_get_task_log` with the full UPID."
+    err = _validate_upid(params.upid)
+    if err:
+        return err
+    try:
+        await http_client.stop_task(params.upid)
+    except Exception as exc:
+        return http_client.format_http_error(exc)
+
+    reason_suffix = f" (reason: {params.reason})" if params.reason else ""
+    return (
+        f"OK: stop requested for task `{params.upid}`{reason_suffix}. "
+        f"Check with `pbs_get_task_status` — the task ends at its next "
+        f"abort checkpoint."
     )

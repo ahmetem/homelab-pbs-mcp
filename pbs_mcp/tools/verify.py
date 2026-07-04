@@ -6,7 +6,65 @@ from typing import Any, Optional
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from pbs_mcp import config, http_client
+from pbs_mcp.format import md_table
 from pbs_mcp.mcp_instance import mcp
+
+
+# ---------- pbs_list_verify_jobs -----------------------------------------------
+
+
+class ListVerifyJobsInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+@mcp.tool(
+    name="pbs_list_verify_jobs",
+    annotations={
+        "title": "List PBS verify jobs",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True,
+    },
+)
+async def pbs_list_verify_jobs(params: ListVerifyJobsInput) -> str:
+    """List configured verify jobs: schedule, datastore, and re-verify
+    policy. Answers 'is verification scheduled at all?' — pbs_list_datastores
+    only shows GC/prune schedules."""
+    cfg = config.require_config()
+    if cfg:
+        return cfg
+    try:
+        data = await http_client.get("/config/verify")
+    except Exception as exc:
+        return http_client.format_http_error(exc)
+
+    if not isinstance(data, list) or not data:
+        return (
+            "_No verify jobs configured. Snapshots are only verified when "
+            "pbs_run_verify is called manually._"
+        )
+
+    rows = []
+    for job in data:
+        ignore = job.get("ignore-verified")
+        reverify = (
+            f"skip verified < {job.get('outdated-after', '?')}d"
+            if ignore
+            else "always"
+        )
+        rows.append(
+            [
+                job.get("id", "?"),
+                job.get("store", "-"),
+                job.get("schedule", "-"),
+                reverify,
+                job.get("comment", "") or "-",
+            ]
+        )
+    return "## PBS verify jobs\n\n" + md_table(
+        ["Job", "Datastore", "Schedule", "Re-verify policy", "Comment"], rows
+    )
 
 
 class RunVerifyInput(BaseModel):

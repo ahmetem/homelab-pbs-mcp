@@ -2,7 +2,7 @@
 
 MCP server for **Proxmox Backup Server**. Exposes datastore status, snapshot
 inventory, garbage collection, verify, and prune over the PBS REST API as
-13 LLM-callable tools. Designed for the
+17 LLM-callable tools. Designed for the
 [Model Context Protocol](https://modelcontextprotocol.io).
 
 Türkçe için → [README.tr.md](README.tr.md)
@@ -14,23 +14,32 @@ isn't where you are — answering "is anything broken?" from a chat assistant,
 or wiring PBS state into a homelab agent that schedules verifies and prunes
 based on real conditions.
 
-## Tools (13)
+## Tools (17)
 
 | # | Tool | Mode | Notes |
 |---|------|------|-------|
-| 1 | `pbs_list_datastores` | read | Configured datastores + schedules |
-| 2 | `pbs_datastore_status` | read | total / used / available bytes |
-| 3 | `pbs_list_groups` | read | Per-group snapshot count, owner, corruption flag |
-| 4 | `pbs_list_snapshots` | read | Size, files, last verify state, protected flag |
-| 5 | `pbs_get_task_status` | read | UPID → running / OK / error |
-| 6 | `pbs_get_task_log` | read | Tail or paginate a task log |
-| 7 | `pbs_list_tasks` | read | Recent tasks, optional filters |
-| 8 | `pbs_gc_status` | read | Last GC stats: bytes referenced, pending, removed |
-| 9 | `pbs_run_gc` | **write** | Trigger GC, returns UPID (async) |
-| 10 | `pbs_run_verify` | **write** | Trigger verify, optional snapshot scope |
+| 1 | `pbs_health_overview` | read | One-call health report: storage, GC, verify coverage, freshness, failed tasks |
+| 2 | `pbs_list_datastores` | read | Configured datastores + schedules |
+| 3 | `pbs_datastore_status` | read | total / used / available bytes |
+| 4 | `pbs_list_groups` | read | Per-group snapshot count, owner, corruption flag |
+| 5 | `pbs_list_snapshots` | read | Newest-first with `limit`; `summary=true` for one row per group |
+| 6 | `pbs_get_task_status` | read | UPID → running / OK / error |
+| 7 | `pbs_get_task_log` | read | Paginate a task log, or `tail=true` for just the end |
+| 8 | `pbs_list_tasks` | read | Recent tasks; full UPIDs handed out for running/failed ones |
+| 9 | `pbs_gc_status` | read | Last GC stats: bytes referenced, pending, removed |
+| 10 | `pbs_list_verify_jobs` | read | Scheduled verify jobs + re-verify policy |
 | 11 | `pbs_prune_dry_run` | read | Preview which snapshots a retention policy would drop |
-| 12 | `pbs_prune` | **write** | Apply retention policy |
-| 13 | `pbs_forget_snapshot` | **write** | Delete one snapshot (corrupt cleanup) |
+| 12 | `pbs_run_gc` | **write** | Trigger GC, returns UPID (async) |
+| 13 | `pbs_run_verify` | **write** | Trigger verify, optional snapshot scope |
+| 14 | `pbs_prune` | **write** | Apply retention policy |
+| 15 | `pbs_protect_snapshot` | **write** | Set/clear the protected flag (prune/forget skip protected) |
+| 16 | `pbs_forget_snapshot` | **write** | Delete one snapshot (corrupt cleanup) |
+| 17 | `pbs_stop_task` | **write** | Abort a running task (e.g. GC stuck on slow NFS) |
+
+Start with `pbs_health_overview` for any "is PBS okay?" question — it fetches
+datastore status, GC stats, groups, snapshots, node status, and recent tasks
+concurrently and condenses them into one verdict, replacing five separate
+tool calls.
 
 Write tools require both `PBS_ALLOW_WRITE=true` in the environment **and**
 `confirm=true` in the call itself. Restore is intentionally out of scope —
@@ -103,9 +112,10 @@ Restart the client. The `pbs_*` tools should appear.
 
 ## Notes / gotchas
 
-* **First-call cache lag**: PBS caches ACLs for a few seconds. If you just
-  granted permissions and the next call returns "permission check failed",
-  wait 3 seconds and retry.
+* **First-call cache lag**: PBS caches ACLs for a few seconds. GET requests
+  retry once automatically after a short delay on 403 / connect errors, so
+  a freshly granted token usually just works. If it still fails, wait a few
+  seconds and retry.
 * **Token vs user permissions**: PBS API tokens get the intersection of the
   parent user's ACLs and the token's ACLs. With `root@pam!mcp` the parent
   is unrestricted, so only the token's ACL matters in practice.
@@ -114,6 +124,15 @@ Restart the client. The `pbs_*` tools should appear.
   `PBS_VERIFY_TLS=true` and `PBS_CA_BUNDLE` to a PEM file.
 * **UPIDs are tied to their creator**: a UPID created by a now-deleted user
   becomes unreadable. Don't recycle PBS users while there are pending tasks.
+
+## Development
+
+```bash
+pip install -e .[dev]
+pytest
+```
+
+Tests stub the HTTP layer — no PBS instance needed.
 
 ## License
 
