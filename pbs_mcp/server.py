@@ -1,7 +1,7 @@
 """pbs-mcp FastMCP server entry point.
 
 Configuration is loaded from environment variables (typically via .env):
-    PBS_HOST              - PBS REST URL, e.g. https://192.168.1.27:8007
+    PBS_HOST              - PBS REST URL, e.g. https://your-pbs-host:8007
     PBS_TOKEN_ID          - API token id, e.g. root@pam!mcp
     PBS_TOKEN_SECRET      - API token secret (UUID)
     PBS_NODE              - node name in task UPIDs (default: 'pbs')
