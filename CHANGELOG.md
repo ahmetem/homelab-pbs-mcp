@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-07-30
+
+### Changed
+- **mcp SDK 2.x support** (spec revision 2026-07-28). `pbs_mcp/mcp_instance.py`
+  imports `MCPServer` and falls back to `FastMCP` on the 1.x maintenance line;
+  it stays the only module that touches the SDK's server class. The decorator
+  API did not move, so all 17 tools register unchanged and the 29 tests pass on
+  both SDK majors. Verified over real stdio (the exact command Claude Desktop
+  runs): `protocol_version=2026-07-28`, 17 tools, `pbs_list_datastores` answering
+  from the live PBS.
+- **Dependency floor raised to `mcp>=2.0,<3`.** CT 207's autodeploy runs
+  `pip install -e .` without `-U`, so any range that mcp 1.29.0 already satisfied
+  would have left the deployed venv on the 1.x line forever. Sized as a minor
+  release: the server itself still runs on 1.x through the fallback, which is
+  also what keeps it alive if that pip step ever fails.
+- The previous `<2.0` pin was the 2026-07-29 stop-gap, when an unpinned rebuild
+  pulled mcp 2.0.0 and every MCP server on CT 207 failed to start. The cause was
+  exactly the `FastMCP` -> `MCPServer` rename this fallback now absorbs.
+
 ## [0.3.1] - 2026-07-29
 
 ### Fixed
