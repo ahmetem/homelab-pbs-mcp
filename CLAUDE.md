@@ -20,6 +20,10 @@
 
 ## Nereye bakılır
 - Araçlar `pbs_mcp/tools/` altında; araç envanterini oradan oku (sayı yazmıyorum, bayatlar)
+- **`pbs_mcp/mcp_instance.py` SDK'nın server sınıfına dokunan TEK modüldür** (v0.4.0,
+  spec revizyonu 2026-07-28): `MCPServer` importu `ImportError`'da 1.x'in `FastMCP`'sine
+  düşer. Decorator API taşınmadığı için araçlar iki majörde de aynı kaydolur. Başka
+  modüle `mcp.server.*` importu ekleme — 1.x'te sessizce kırılır.
 - `moderate` modda indeksleme `pbs_mcp/tools/` altını filtreleyebiliyor — CBM ile kod
   ararken tool handler'ları göremezsen indeksin `full` modda olduğundan emin ol
 
