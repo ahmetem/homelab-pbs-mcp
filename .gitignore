@@ -1,5 +1,8 @@
 .env
 .env.local
+.env.*
+# .env.example sablondur, sir icermez ve izlenir:
+!.env.example
 *.pyc
 __pycache__/
 *.egg-info/

@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.1] - 2026-09-03
+
+### Fixed
+- **`.gitignore` did not cover `.env` variants.** `.env.bak-wan-20260902` and
+  `.env.lanmode-20260902`, left over from the 2026-09-02 LAN-mode switch, matched
+  neither `.env` nor `.env.local`: they were untracked but **not ignored**, so a
+  `git add -A` would have committed a live PBS API token. `.env.*` is now ignored
+  with `!.env.example` kept tracked (the exception is on its own line -- a
+  trailing `#` comment would make it part of the pattern and silently disable the
+  negation). The leftover files were deleted; the `.bak-wan` copy was
+  byte-identical to the current `.env`.
+
 ## [0.4.0] - 2026-07-30
 
 ### Changed
