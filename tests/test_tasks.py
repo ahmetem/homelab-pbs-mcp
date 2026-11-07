@@ -15,7 +15,7 @@ from pbs_mcp.tools.tasks import (
     pbs_list_tasks,
 )
 
-UPID = "UPID:pbs:00001234:0000ABCD:00012345:verify::root@pam!mcp:"
+UPID = "UPID:pbs:00001234:0000ABCD:00000001:00012345:verify::root@pam!mcp:"
 TASKS_PATH = "/nodes/pbs/tasks"
 
 
@@ -105,3 +105,45 @@ def test_task_log_limit_validation():
         GetTaskLogInput(upid=UPID, limit=0)
     with pytest.raises(ValidationError):
         GetTaskLogInput(upid=UPID, limit=999999)
+
+
+def test_errors_only_tasks_expose_upids_without_exitstatus(pbs_config, fake_http):
+    """PBS errors=1 results may omit exitstatus entirely."""
+    failed_upid = UPID.replace(":verify:", ":verificationjob:")
+
+    fake_http.get[TASKS_PATH] = [
+        {
+            "type": "verificationjob",
+            "id": "cloud-critical",
+            "starttime": 1000,
+            "status": "stopped",
+            "user": "root@pam",
+            "upid": failed_upid,
+        }
+    ]
+
+    out = asyncio.run(
+        pbs_list_tasks(ListTasksInput(errors_only=True))
+    )
+
+    assert failed_upid in out
+    assert "Follow-up UPIDs" in out
+
+
+def test_valid_escaped_pbs_upid_accepted(pbs_config, monkeypatch):
+    """PBS worker IDs use literal backslash-x hexadecimal escapes."""
+    escaped_upid = (
+        UPID.replace(":verify::", r":verify:cloud\x2dcritical:")
+    )
+
+    async def fake_task_status(upid):
+        assert upid == escaped_upid
+        return {"status": "stopped", "exitstatus": "OK"}
+
+    monkeypatch.setattr(http_client, "task_status", fake_task_status)
+
+    out = asyncio.run(
+        pbs_get_task_status(GetTaskStatusInput(upid=escaped_upid))
+    )
+
+    assert "malformed UPID" not in out

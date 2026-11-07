@@ -19,8 +19,10 @@ from pbs_mcp.mcp_instance import mcp
 
 # UPID format: UPID:node:pid_hex:pstart_hex:starttime_hex:type:id:user@realm[!token]:
 _UPID_RE = re.compile(
-    r"^UPID:[A-Za-z0-9._-]+:[0-9A-Fa-f]+:[0-9A-Fa-f]+:[0-9A-Fa-f]+:"
-    r"[A-Za-z0-9_-]+:[^:]*:[A-Za-z0-9._@!-]+:$"
+    r"^UPID:[A-Za-z0-9][A-Za-z0-9._-]*:"
+    r"[0-9A-Fa-f]{8}:[0-9A-Fa-f]{8,16}:"
+    r"[0-9A-Fa-f]{8,16}:[0-9A-Fa-f]{8}:"
+    r"[^:\s]+:[^:\s]*:[^:\s]+:$"
 )
 
 
@@ -261,7 +263,7 @@ async def pbs_list_tasks(params: ListTasksInput) -> str:
         upid = t.get("upid") or ""
         # Only running/failed tasks need follow-up; a truncated UPID is
         # useless for that, so hand out the full string for exactly those.
-        if upid and (status == "running" or (exitstatus and exitstatus != "OK")):
+        if upid and (params.errors_only or status == "running" or (exitstatus and exitstatus != "OK")):
             followup_upids.append(f"- `{upid}` — {t.get('type', '?')} {status_cell}")
         rows.append(
             [
